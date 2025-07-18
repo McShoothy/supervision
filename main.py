@@ -5,9 +5,10 @@ import time
 import json
 import os
 import multiprocessing
+import platform
 
 # Control state file for communication between windows
-STATE_FILE = "/tmp/vj_state.json"
+STATE_FILE = "/tmp/vj_state.json" if platform.system() != "Windows" else "vj_state.json"
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -121,43 +122,86 @@ def save_detection_counts(counts):
         pass
 
 def get_monitor_info():
-    """Get monitor information using xrandr"""
-    try:
-        import subprocess
-        result = subprocess.run(['xrandr', '--current'], capture_output=True, text=True)
-        if result.returncode != 0:
+    """Get monitor information cross-platform"""
+    if platform.system() == "Windows":
+        try:
+            # Try to get Windows monitor info using ctypes
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            monitors = []
+
+            def enum_display_monitors_proc(hdc, lprcClip, lpfnEnum, dwData):
+                monitors.append((
+                    lprcClip.contents.left,
+                    lprcClip.contents.top,
+                    lprcClip.contents.right - lprcClip.contents.left,
+                    lprcClip.contents.bottom - lprcClip.contents.top
+                ))
+                return True
+
+            # Define the callback function type
+            MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool,
+                                               wintypes.HDC,
+                                               ctypes.POINTER(wintypes.RECT),
+                                               wintypes.LPARAM)
+
+            # Get all monitors
+            try:
+                user32.EnumDisplayMonitors(None, None, MonitorEnumProc(enum_display_monitors_proc), 0)
+            except:
+                # Fallback: get primary monitor size
+                width = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+                height = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+                monitors = [(0, 0, width, height)]
+
+            if not monitors:
+                monitors = [(0, 0, 1920, 1080)]  # Ultimate fallback
+
+            return monitors
+
+        except Exception as e:
+            print(f"Windows monitor detection failed: {e}")
             return [(0, 0, 1920, 1080)]  # Fallback
+    else:
+        # Linux/Unix - use xrandr
+        try:
+            import subprocess
+            result = subprocess.run(['xrandr', '--current'], capture_output=True, text=True)
+            if result.returncode != 0:
+                return [(0, 0, 1920, 1080)]  # Fallback
 
-        monitors = []
-        lines = result.stdout.split('\n')
+            monitors = []
+            lines = result.stdout.split('\n')
 
-        for line in lines:
-            if ' connected' in line and '+' in line:
-                # Parse line like: "HDMI-1 connected 1920x1080+1920+0"
-                parts = line.split()
-                for part in parts:
-                    if '+' in part and 'x' in part:
-                        # Extract geometry: widthxheight+x_offset+y_offset
-                        try:
-                            geom = part.split('+')
-                            width_height = geom[0].split('x')
-                            width = int(width_height[0])
-                            height = int(width_height[1])
-                            x_offset = int(geom[1]) if len(geom) > 1 else 0
-                            y_offset = int(geom[2]) if len(geom) > 2 else 0
-                            monitors.append((x_offset, y_offset, width, height))
-                            break
-                        except (ValueError, IndexError):
-                            continue
+            for line in lines:
+                if ' connected' in line and '+' in line:
+                    # Parse line like: "HDMI-1 connected 1920x1080+1920+0"
+                    parts = line.split()
+                    for part in parts:
+                        if '+' in part and 'x' in part:
+                            # Extract geometry: widthxheight+x_offset+y_offset
+                            try:
+                                geom = part.split('+')
+                                width_height = geom[0].split('x')
+                                width = int(width_height[0])
+                                height = int(width_height[1])
+                                x_offset = int(geom[1]) if len(geom) > 1 else 0
+                                y_offset = int(geom[2]) if len(geom) > 2 else 0
+                                monitors.append((x_offset, y_offset, width, height))
+                                break
+                            except (ValueError, IndexError):
+                                continue
 
-        if not monitors:
-            monitors = [(0, 0, 1920, 1080)]  # Fallback
+            if not monitors:
+                monitors = [(0, 0, 1920, 1080)]  # Fallback
 
-        # Sort by x_offset to ensure primary monitor is first
-        monitors.sort(key=lambda m: m[0])
-        return monitors
-    except:
-        return [(0, 0, 1920, 1080)]  # Fallback
+            # Sort by x_offset to ensure primary monitor is first
+            monitors.sort(key=lambda m: m[0])
+            return monitors
+        except:
+            return [(0, 0, 1920, 1080)]  # Fallback
 
 def create_fullscreen_window(monitor_index=0):
     """Create a true fullscreen OpenCV window on specified monitor"""
@@ -736,6 +780,41 @@ def letterbox_image(image, target_size, fill_color=(0, 0, 0)):
     left = (tw - nw) // 2
     new_image[top:top+nh, left:left+nw] = image_resized
     return new_image
+
+def init_camera():
+    """Initialize camera with cross-platform compatibility"""
+    global cap
+    try:
+        # Try DirectShow backend on Windows for better compatibility
+        if platform.system() == "Windows":
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(0)
+
+        # Set camera properties
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+
+        # Test if camera is working
+        ret, test_frame = cap.read()
+        if not ret:
+            print("Warning: Camera initialization failed, trying fallback...")
+            cap.release()
+            cap = cv2.VideoCapture(0)  # Fallback without specific backend
+            ret, test_frame = cap.read()
+            if not ret:
+                print("Error: No camera found or camera access denied")
+                return False
+
+        print(f"Camera initialized successfully on {platform.system()}")
+        return True
+    except Exception as e:
+        print(f"Camera initialization error: {e}")
+        return False
+
+# Initialize camera at startup
+init_camera()
 
 def main_video_loop():
     global prev_gray, frame_count, is_fullscreen
