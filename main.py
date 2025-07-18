@@ -10,9 +10,8 @@ import platform
 # Control state file for communication between windows
 STATE_FILE = "/tmp/vj_state.json" if platform.system() != "Windows" else "vj_state.json"
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+# Initialize camera variable but don't create capture object yet
+cap = None
 prev_gray = None
 
 hand_names = ["Gesture", "Wave", "Grip", "Touch", "Pulse"]
@@ -327,433 +326,6 @@ def apply_shift_filter(frame, shift_x, shift_y):
 roll_offset_x = 0
 roll_offset_y = 0
 
-def update_video_texture():
-    global prev_gray, frame_count
-    ret, frame = cap.read()
-    if not ret:
-        cv2.destroyAllWindows()
-        return
-
-    # Load current state from control window
-    vj_state = load_state()
-
-    # Check if control window requested exit
-    if not vj_state.get('running', True):
-        cv2.destroyAllWindows()
-        return
-
-    # Handle fullscreen toggle
-    current_fullscreen_state = vj_state.get('fullscreen', False)
-    current_monitor = vj_state.get('fullscreen_monitor', 0)
-
-    if current_fullscreen_state != is_fullscreen:
-        cv2.destroyWindow(cv2_window_name)
-        if current_fullscreen_state:
-            create_fullscreen_window(current_monitor)
-        else:
-            create_windowed_window()
-
-    now = time.time()
-    global hue_shift
-    hue_shift = (hue_shift + 2) % 180
-
-    # Use loaded state for controls
-    invert = vj_state['invert']
-    mono = vj_state['monochrome']
-    mono_hue = vj_state['mono_hue']
-    show_boxes = vj_state['show_boxes']
-    presentation_mode = vj_state['presentation_mode']
-
-    # Individual box controls
-    show_silhouettes = vj_state.get('show_silhouettes', True)
-    show_bright = vj_state.get('show_bright', True)
-    show_dark = vj_state.get('show_dark', True)
-    show_moving = vj_state.get('show_moving', True)
-    silhouette_threshold = vj_state.get('silhouette_threshold', 50)
-
-    # Max box counts from state
-    config.top_bright_spots = vj_state.get('max_bright', config.top_bright_spots)
-    config.top_dark_spots = vj_state.get('max_dark', config.top_dark_spots)
-    config.top_moving_spots = vj_state.get('max_moving', config.top_moving_spots)
-
-    # Apply monochrome if enabled
-    if mono:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        hsv[..., 0] = mono_hue
-        hsv[..., 1] = 255
-        frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-    # Apply invert if enabled
-    if invert:
-        frame = cv2.bitwise_not(frame)
-
-    full_res_frame = cv2.resize(frame, (1280, 720))
-
-    # --- Dark mode: darken the video feed ---
-    dark_overlay = np.full_like(full_res_frame, DARK_BG, dtype=np.uint8)
-    alpha = 0.25 if not presentation_mode else 0.5
-    frame_dark = cv2.addWeighted(full_res_frame, 1 - alpha, dark_overlay, alpha, 0)
-
-    # Downscale for detection
-    proc_frame = cv2.resize(full_res_frame, (640, 360))
-    gray = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2GRAY)
-
-    # Only update detection and overlays every 3 frames for performance
-    if frame_count % 2 == 0:
-        overlay_small = np.zeros_like(proc_frame, dtype=np.uint8)
-        box_centers = []
-        detection_counts = {'humans': 0, 'bright': 0, 'dark': 0, 'move': 0, 'faces': 0}
-
-        if show_boxes:
-            # Initialize bright_spot_centers to avoid reference errors
-            bright_spot_centers = []
-
-            # Silhouette detection
-            if show_silhouettes:
-                fg_mask = bg_subtractor.apply(proc_frame)
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
-                fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-                # --- use silhouette_threshold from state ---
-                _, fg_mask = cv2.threshold(fg_mask, silhouette_threshold, 255, cv2.THRESH_BINARY)
-                contours_silhouette, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                silhouette_names = ["Ghost", "Shadow", "Echo", "Outline", "Trace"]
-                for idx, contour in enumerate(contours_silhouette):
-                    area = cv2.contourArea(contour)
-                    if area > config.min_silhouette_area:
-                        color = hsv2bgr((hue_shift + idx * 10) % 180)
-                        cv2.drawContours(overlay_small, [contour], -1, color, 1)  # 1px thick
-                        label = random.choice(silhouette_names)
-                        percent = random.randint(0, 100)
-                        obj_id = random.randint(1000, 9999)
-                        x, y, w, h = cv2.boundingRect(contour)
-                        cv2.putText(overlay_small, f"Silhouette: {label} [{obj_id}] {{{percent}%}}", (x, y-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-
-                        # 1/20 chance to invert this silhouette area
-                        if random.randint(1, 20) == 1:
-                            # Scale coordinates to full resolution
-                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
-                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
-                            x_full = int(x * scale_x)
-                            y_full = int(y * scale_y)
-                            w_full = int(w * scale_x)
-                            h_full = int(h * scale_y)
-
-                            # Ensure coordinates are within frame bounds
-                            x_full = max(0, min(x_full, full_res_frame.shape[1] - w_full))
-                            y_full = max(0, min(y_full, full_res_frame.shape[0] - h_full))
-                            w_full = min(w_full, full_res_frame.shape[1] - x_full)
-                            h_full = min(h_full, full_res_frame.shape[0] - y_full)
-
-                            # Invert the region inside the silhouette bounding box
-                            if w_full > 0 and h_full > 0:
-                                frame_dark[y_full:y_full+h_full, x_full:x_full+w_full] = cv2.bitwise_not(frame_dark[y_full:y_full+h_full, x_full:x_full+w_full])
-
-            # Bright spots (configurable amount)
-            if show_bright:
-                _, thresh = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
-                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                contour_brightness = []
-                for cnt in contours:
-                    mask = np.zeros(gray.shape, np.uint8)
-                    cv2.drawContours(mask, [cnt], -1, 255, -1)
-                    brightness = cv2.mean(gray, mask=mask)[0]
-                    contour_brightness.append((brightness, cnt))
-                contour_brightness.sort(reverse=True, key=lambda x: x[0])
-                top_bright_contours = [cnt for _, cnt in contour_brightness[:config.top_bright_spots]]
-                detection_counts['bright'] = len(top_bright_contours)
-
-                bright_spot_centers = []
-                for idx, cnt in enumerate(top_bright_contours):
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cx, cy = x + w // 2, y + h // 2
-                    box_w, box_h = max(w // 2, config.min_bright_area), max(h // 2, config.min_bright_area)
-                    x1, y1 = cx - box_w // 2, cy - box_h // 2
-                    x2, y2 = cx + box_w // 2, cy + box_h // 2
-                    color = (255, 255, 255)  # WHITE for bright spot boxes
-                    cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                    label = random.choice(bright_names)
-                    percent = random.randint(0, 100)
-                    obj_id = random.randint(1000, 9999)
-                    text = f"Bright: {label} [{obj_id}] {{{percent}%}}"
-                    cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                    box_centers.append(((cx, cy), (x1, y1, x2, y2), 'bright'))
-                    bright_spot_centers.append((cx, cy))
-
-                    # 1/20 chance to invert this box
-                    if random.randint(1, 20) == 1:
-                        # Scale coordinates to full resolution
-                        scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
-                        scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
-                        x1_full = int(x1 * scale_x)
-                        y1_full = int(y1 * scale_y)
-                        x2_full = int(x2 * scale_x)
-                        y2_full = int(y2 * scale_y)
-
-                        # Ensure coordinates are within frame bounds
-                        x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
-                        y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
-                        x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
-                        y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
-
-                        # Invert the region inside the box on the final frame
-                        if x2_full > x1_full and y2_full > y1_full:
-                            frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
-
-            else:
-                detection_counts['bright'] = 0
-
-            # Darkest spots (configurable amount)
-            if show_dark:
-                _, thresh_dark = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY_INV)
-                contours_dark, _ = cv2.findContours(thresh_dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                contour_darkness = []
-                for cnt in contours_dark:
-                    mask = np.zeros(gray.shape, np.uint8)
-                    cv2.drawContours(mask, [cnt], -1, 255, -1)
-                    darkness = cv2.mean(gray, mask=mask)[0]
-                    contour_darkness.append((darkness, cnt))
-                contour_darkness.sort(key=lambda x: x[0])
-                top_dark_contours = [cnt for _, cnt in contour_darkness[:config.top_dark_spots]]
-                detection_counts['dark'] = len(top_dark_contours)
-
-                for idx, cnt in enumerate(top_dark_contours):
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cx, cy = x + w // 2, y + h // 2
-                    box_w, box_h = max(w // 2, config.min_dark_area), max(h // 2, config.min_dark_area)
-                    x1, y1 = cx - box_w // 2, cy - box_h // 2
-                    x2, y2 = cx + box_w // 2, cy + box_h // 2
-                    color = hsv2bgr((hue_shift + idx * 10 + 90) % 180)
-                    cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                    label = "Void"
-                    percent = random.randint(0, 100)
-                    obj_id = random.randint(1000, 9999)
-                    text = f"Dark: {label} [{obj_id}] {{{percent}%}}"
-                    cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                    box_centers.append(((cx, cy), (x1, y1, x2, y2), 'dark'))
-
-                    # 1/20 chance to invert this box
-                    if random.randint(1, 20) == 1:
-                        # Scale coordinates to full resolution
-                        scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
-                        scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
-                        x1_full = int(x1 * scale_x)
-                        y1_full = int(y1 * scale_y)
-                        x2_full = int(x2 * scale_x)
-                        y2_full = int(y2 * scale_y)
-
-                        # Ensure coordinates are within frame bounds
-                        x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
-                        y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
-                        x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
-                        y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
-
-                        # Invert the region inside the box on the final frame
-                        if x2_full > x1_full and y2_full > y1_full:
-                            frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
-
-            else:
-                detection_counts['dark'] = 0
-
-            # Moving spots (configurable amount)
-            if show_moving and prev_gray is not None:
-                diff = cv2.absdiff(gray, prev_gray)
-                flat_diff = diff.flatten()
-                if len(flat_diff) > config.top_moving_spots:
-                    top_moving_idx = np.argpartition(flat_diff, -config.top_moving_spots)[-config.top_moving_spots:]
-                    coords_move = [np.unravel_index(idx, diff.shape) for idx in top_moving_idx]
-                    detection_counts['move'] = len(coords_move)
-                    for idx, (y, x) in enumerate(coords_move):
-                        cx, cy = x, y
-                        box_w, box_h = config.min_moving_area, config.min_moving_area
-                        x1, y1 = cx - box_w // 2, cy - box_h // 2
-                        x2, y2 = cx + box_w // 2, cy + box_h // 2
-                        color = hsv2bgr((hue_shift + idx * 10 + 120) % 180)
-                        cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                        label = random.choice(moving_names)
-                        percent = random.randint(0, 100)
-                        obj_id = random.randint(1000, 9999)
-                        text = f"Move: {label} [{obj_id}] {{{percent}%}}"
-                        cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                        box_centers.append(((cx, cy), (x1, y1, x2, y2), 'move'))
-
-                        # 1/20 chance to invert this box
-                        if random.randint(1, 20) == 1:
-                            # Scale coordinates to full resolution
-                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
-                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
-                            x1_full = int(x1 * scale_x)
-                            y1_full = int(y1 * scale_y)
-                            x2_full = int(x2 * scale_x)
-                            y2_full = int(y2 * scale_y)
-
-                            # Ensure coordinates are within frame bounds
-                            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
-                            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
-                            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
-                            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
-
-                            # Invert the region inside the box on the final frame
-                            if x2_full > x1_full and y2_full > y1_full:
-                                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
-
-            else:
-                detection_counts['move'] = 0
-
-            # Draw lines from each bright spot to the 2 nearest boxes
-            if len(box_centers) > 2 and 'bright_spot_centers' in locals():
-                for idx, b_c in enumerate(bright_spot_centers):
-                    # Calculate distances to all other boxes
-                    distances = []
-                    for i, (center, _, _) in enumerate(box_centers):
-                        if center != b_c:  # Don't include the bright spot itself
-                            dx = center[0] - b_c[0]
-                            dy = center[1] - b_c[1]
-                            distance = (dx * dx + dy * dy) ** 0.5  # Euclidean distance
-                            distances.append((distance, i, center))
-
-                    # Sort by distance and get the 2 nearest
-                    distances.sort(key=lambda x: x[0])
-                    nearest_boxes = distances[:min(2, len(distances))]
-
-                    # Draw lines to the 2 nearest boxes
-                    for distance, box_idx, target_center in nearest_boxes:
-                        color = (255, 255, 255)  # WHITE for lines
-                        # Draw as thin as possible (1px), anti-aliased line
-                        cv2.line(overlay_small, b_c, target_center, color, 1, lineType=cv2.LINE_AA)
-
-                    # 1/5 chance to draw a third line to a random box (not considering distance)
-                    if random.randint(1, 5) == 1 and len(distances) > 2:
-                        # Get boxes that weren't already connected (exclude the 2 nearest)
-                        used_indices = {box_idx for _, box_idx, _ in nearest_boxes}
-                        remaining_boxes = [item for item in distances if item[1] not in used_indices]
-
-                        if remaining_boxes:
-                            # Pick a random box from the remaining ones
-                            random_box = random.choice(remaining_boxes)
-                            _, _, random_target_center = random_box
-                            color = (255, 255, 255)  # WHITE for lines
-                            cv2.line(overlay_small, b_c, random_target_center, color, 1, lineType=cv2.LINE_AA)
-
-        # Apply random box inversions (1/10 chance per box)
-        if box_centers and random.randint(1, 10) == 1:
-            # Select a random box to invert
-            selected_box = random.choice(box_centers)
-            _, (x1, y1, x2, y2), _ = selected_box
-
-            # Scale coordinates to full resolution
-            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
-            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
-            x1_full = int(x1 * scale_x)
-            y1_full = int(y1 * scale_y)
-            x2_full = int(x2 * scale_x)
-            y2_full = int(y2 * scale_y)
-
-            # Ensure coordinates are within frame bounds
-            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
-            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
-            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
-            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
-
-            # Invert the region inside the box on the final frame
-            if x2_full > x1_full and y2_full > y1_full:
-                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
-
-        # Save detection counts for control window
-        save_detection_counts(detection_counts)
-
-        # Store for reuse in skipped frames
-        main_video_loop.last_overlay = overlay_small
-    else:
-        # Reuse previous overlay
-        overlay_small = getattr(main_video_loop, 'last_overlay', np.zeros_like(proc_frame, dtype=np.uint8))
-
-    # Scale overlay to full resolution and apply to frame
-    overlay_full = cv2.resize(overlay_small, (1280, 720), interpolation=cv2.INTER_LINEAR)
-    final_frame = cv2.addWeighted(frame_dark, 1.0, overlay_full, 1.0, 0)
-
-    # Apply filters based on vj_state
-    if vj_state.get('filter_cvr', False):
-        final_frame = apply_crt_filter(final_frame)
-    if vj_state.get('filter_static', False):
-        final_frame = apply_static_filter(final_frame)
-    if vj_state.get('filter_grain', False):
-        final_frame = apply_grain_filter(final_frame)
-
-    # --- Rolling logic ---
-    global roll_offset_x, roll_offset_y
-    speed_x = vj_state.get('shift_x', 0)
-    speed_y = vj_state.get('shift_y', 0)
-    roll_offset_x = (roll_offset_x + speed_x) % final_frame.shape[1]
-    roll_offset_y = (roll_offset_y + speed_y) % final_frame.shape[0]
-    if speed_x != 0 or speed_y != 0:
-        final_frame = apply_shift_filter(final_frame, roll_offset_x, roll_offset_y)
-
-    # --- Tiling logic ---
-    allowed_tiles = [1, 4, 9, 16, 25, 36]
-    tile_count = vj_state.get('tile_count', 1)
-    # Snap to nearest allowed tile count
-    tile_count = min(allowed_tiles, key=lambda x: abs(x - tile_count))
-    grid_size = int(np.sqrt(tile_count))
-    h, w = final_frame.shape[:2]
-    tile_h, tile_w = h // grid_size, w // grid_size
-    tile_img = cv2.resize(final_frame, (tile_w, tile_h))
-    tiled_frame = np.zeros_like(final_frame)
-    for i in range(grid_size):
-        for j in range(grid_size):
-            idx = i * grid_size + j
-            if idx >= tile_count:
-                break
-            y1, y2 = i * tile_h, (i + 1) * tile_h
-            x1, x2 = j * tile_w, (j + 1) * tile_w
-            tiled_frame[y1:y2, x1:x2] = tile_img
-    final_frame = tiled_frame
-
-    # --- FPS calculation ---
-    if not hasattr(main_video_loop, 'last_fps_time'):
-        main_video_loop.last_fps_time = time.time()
-        main_video_loop.frame_counter = 0
-    main_video_loop.frame_counter += 1
-    now_fps = time.time()
-    if now_fps - main_video_loop.last_fps_time >= 1.0:
-        fps = main_video_loop.frame_counter / (now_fps - main_video_loop.last_fps_time)
-        # Save FPS to state file for control window
-        vj_state['video_fps'] = round(fps, 1)
-        with open(STATE_FILE, 'w') as f:
-            json.dump(vj_state, f)
-        main_video_loop.last_fps_time = now_fps
-        main_video_loop.frame_counter = 0
-
-    # --- Letterbox for fullscreen: fill bars with black ---
-    if is_fullscreen:
-        # Get current monitor size
-        monitors = get_monitor_info()
-        mon_w, mon_h = 1920, 1080
-        if vj_state.get('fullscreen_monitor', 0) < len(monitors):
-            _, _, mon_w, mon_h = monitors[vj_state.get('fullscreen_monitor', 0)]
-        # Letterbox the frame to fit monitor, black bars
-        final_frame = letterbox_image(final_frame, (mon_h, mon_w), fill_color=(0, 0, 0))
-
-    # Display the frame - with error handling
-    try:
-        cv2.imshow(cv2_window_name, final_frame)
-    except cv2.error:
-        create_windowed_window()
-        cv2.imshow(cv2_window_name, final_frame)
-
-    # Handle key presses
-    key = cv2.waitKey(1) & 0xFF
-    if key == 27:  # ESC key
-        cv2.destroyAllWindows()
-        return
-    elif key == ord('f'):  # F key to toggle fullscreen
-        current_state = load_state()
-        current_state['fullscreen'] = not current_state['fullscreen']
-        with open(STATE_FILE, 'w') as f:
-            json.dump(current_state, f)
-
-    prev_gray = gray.copy()
-    frame_count += 1
-
 def get_overlay_video_from_state(vj_state):
     """Return overlay video path if enabled, else None."""
     if vj_state.get('overlay_enabled', False):
@@ -817,7 +389,14 @@ def init_camera():
 init_camera()
 
 def main_video_loop():
-    global prev_gray, frame_count, is_fullscreen
+    global prev_gray, frame_count, is_fullscreen, cap
+
+    # Ensure camera is initialized
+    if cap is None:
+        print("Camera not initialized, attempting to initialize...")
+        if not init_camera():
+            print("Failed to initialize camera. Exiting.")
+            return
 
     print("Waiting for video stream to start...")
     print("Check 'Start Video Stream' in the control panel to begin.")
@@ -839,6 +418,11 @@ def main_video_loop():
         if not vj_state.get('start_video', False):
             time.sleep(0.1)
             continue
+
+        # Create window if not created yet
+        if not window_created:
+            create_windowed_window()
+            window_created = True
 
         # --- Video File Progress Tracking ---
         video_source = vj_state.get('video_source', 'Camera')
@@ -978,7 +562,7 @@ def main_video_loop():
         proc_frame = cv2.resize(full_res_frame, (640, 360))
         gray = cv2.cvtColor(proc_frame, cv2.COLOR_BGR2GRAY)
 
-        # Only update detection and overlays every 3 frames for performance
+        # Only update detection and overlays every frame for performance
         if frame_count % 1 == 0:
             overlay_small = np.zeros_like(proc_frame, dtype=np.uint8)
             box_centers = []
@@ -1181,7 +765,7 @@ def main_video_loop():
                     detection_counts['move'] = 0
 
                 # Draw lines from each bright spot to the 2 nearest boxes
-                if len(box_centers) > 2 and 'bright_spot_centers' in locals():
+                if len(box_centers) > 2 and len(bright_spot_centers) > 0:
                     for idx, b_c in enumerate(bright_spot_centers):
                         # Calculate distances to all other boxes
                         distances = []
@@ -1215,103 +799,104 @@ def main_video_loop():
                                 color = (255, 255, 255)  # WHITE for lines
                                 cv2.line(overlay_small, b_c, random_target_center, color, 1, lineType=cv2.LINE_AA)
 
-            # Save detection counts for control window
-            save_detection_counts(detection_counts)
+                # Save detection counts for control window
+                save_detection_counts(detection_counts)
 
-            # Store for reuse in skipped frames
-            main_video_loop.last_overlay = overlay_small
-        else:
-            # Reuse previous overlay
-            overlay_small = getattr(main_video_loop, 'last_overlay', np.zeros_like(proc_frame, dtype=np.uint8))
+                # Store for reuse in skipped frames
+                main_video_loop.last_overlay = overlay_small
+            else:
+                # Reuse previous overlay
+                overlay_small = getattr(main_video_loop, 'last_overlay', np.zeros_like(proc_frame, dtype=np.uint8))
 
-        # Scale overlay to full resolution and apply to frame
-        overlay_full = cv2.resize(overlay_small, (1280, 720), interpolation=cv2.INTER_LINEAR)
-        final_frame = cv2.addWeighted(frame_dark, 1.0, overlay_full, 1.0, 0)
+            # Scale overlay to full resolution and apply to frame
+            overlay_full = cv2.resize(overlay_small, (1280, 720), interpolation=cv2.INTER_LINEAR)
+            final_frame = cv2.addWeighted(frame_dark, 1.0, overlay_full, 1.0, 0)
 
-        # Apply filters based on vj_state
-        if vj_state.get('filter_cvr', False):
-            final_frame = apply_crt_filter(final_frame)
-        if vj_state.get('filter_static', False):
-            final_frame = apply_static_filter(final_frame)
-        if vj_state.get('filter_grain', False):
-            final_frame = apply_grain_filter(final_frame)
+            # Apply filters based on vj_state
+            if vj_state.get('filter_cvr', False):
+                final_frame = apply_crt_filter(final_frame)
+            if vj_state.get('filter_static', False):
+                final_frame = apply_static_filter(final_frame)
+            if vj_state.get('filter_grain', False):
+                final_frame = apply_grain_filter(final_frame)
 
-        # --- Rolling logic ---
-        global roll_offset_x, roll_offset_y
-        speed_x = vj_state.get('shift_x', 0)
-        speed_y = vj_state.get('shift_y', 0)
-        roll_offset_x = (roll_offset_x + speed_x) % final_frame.shape[1]
-        roll_offset_y = (roll_offset_y + speed_y) % final_frame.shape[0]
-        if speed_x != 0 or speed_y != 0:
-            final_frame = apply_shift_filter(final_frame, roll_offset_x, roll_offset_y)
+            # --- Rolling logic ---
+            global roll_offset_x, roll_offset_y
+            speed_x = vj_state.get('shift_x', 0)
+            speed_y = vj_state.get('shift_y', 0)
+            roll_offset_x = (roll_offset_x + speed_x) % final_frame.shape[1]
+            roll_offset_y = (roll_offset_y + speed_y) % final_frame.shape[0]
+            if speed_x != 0 or speed_y != 0:
+                final_frame = apply_shift_filter(final_frame, roll_offset_x, roll_offset_y)
 
-        # --- Tiling logic ---
-        allowed_tiles = [1, 4, 9, 16, 25, 36]
-        tile_count = vj_state.get('tile_count', 1)
-        # Snap to nearest allowed tile count
-        tile_count = min(allowed_tiles, key=lambda x: abs(x - tile_count))
-        grid_size = int(np.sqrt(tile_count))
-        h, w = final_frame.shape[:2]
-        tile_h, tile_w = h // grid_size, w // grid_size
-        tile_img = cv2.resize(final_frame, (tile_w, tile_h))
-        tiled_frame = np.zeros_like(final_frame)
-        for i in range(grid_size):
-            for j in range(grid_size):
-                idx = i * grid_size + j
-                if idx >= tile_count:
-                    break
-                y1, y2 = i * tile_h, (i + 1) * tile_h
-                x1, x2 = j * tile_w, (j + 1) * tile_w
-                tiled_frame[y1:y2, x1:x2] = tile_img
-        final_frame = tiled_frame
+            # --- Tiling logic ---
+            allowed_tiles = [1, 4, 9, 16, 25, 36]
+            tile_count = vj_state.get('tile_count', 1)
+            # Snap to nearest allowed tile count
+            tile_count = min(allowed_tiles, key=lambda x: abs(x - tile_count))
+            grid_size = int(np.sqrt(tile_count))
+            h, w = final_frame.shape[:2]
+            tile_h, tile_w = h // grid_size, w // grid_size
+            tile_img = cv2.resize(final_frame, (tile_w, tile_h))
+            tiled_frame = np.zeros_like(final_frame)
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    idx = i * grid_size + j
+                    if idx >= tile_count:
+                        break
+                    y1, y2 = i * tile_h, (i + 1) * tile_h
+                    x1, x2 = j * tile_w, (j + 1) * tile_w
+                    tiled_frame[y1:y2, x1:x2] = tile_img
+            final_frame = tiled_frame
 
-        # --- FPS calculation ---
-        if not hasattr(main_video_loop, 'last_fps_time'):
-            main_video_loop.last_fps_time = time.time()
-            main_video_loop.frame_counter = 0
-        main_video_loop.frame_counter += 1
-        now_fps = time.time()
-        if now_fps - main_video_loop.last_fps_time >= 1.0:
-            fps = main_video_loop.frame_counter / (now_fps - main_video_loop.last_fps_time)
-            # Save FPS to state file for control window
-            vj_state['video_fps'] = round(fps, 1)
-            with open(STATE_FILE, 'w') as f:
-                json.dump(vj_state, f)
-            main_video_loop.last_fps_time = now_fps
-            main_video_loop.frame_counter = 0
+            # --- FPS calculation ---
+            if not hasattr(main_video_loop, 'last_fps_time'):
+                main_video_loop.last_fps_time = time.time()
+                main_video_loop.frame_counter = 0
+            main_video_loop.frame_counter += 1
+            now_fps = time.time()
+            if now_fps - main_video_loop.last_fps_time >= 1.0:
+                fps = main_video_loop.frame_counter / (now_fps - main_video_loop.last_fps_time)
+                # Save FPS to state file for control window
+                vj_state['video_fps'] = round(fps, 1)
+                with open(STATE_FILE, 'w') as f:
+                    json.dump(vj_state, f)
+                main_video_loop.last_fps_time = now_fps
+                main_video_loop.frame_counter = 0
 
-        # --- Letterbox for fullscreen: fill bars with black ---
-        if is_fullscreen:
-            # Get current monitor size
-            monitors = get_monitor_info()
-            mon_w, mon_h = 1920, 1080
-            if vj_state.get('fullscreen_monitor', 0) < len(monitors):
-                _, _, mon_w, mon_h = monitors[vj_state.get('fullscreen_monitor', 0)]
-            # Letterbox the frame to fit monitor, black bars
-            final_frame = letterbox_image(final_frame, (mon_h, mon_w), fill_color=(0, 0, 0))
+            # --- Letterbox for fullscreen: fill bars with black ---
+            if is_fullscreen:
+                # Get current monitor size
+                monitors = get_monitor_info()
+                mon_w, mon_h = 1920, 1080
+                if vj_state.get('fullscreen_monitor', 0) < len(monitors):
+                    _, _, mon_w, mon_h = monitors[vj_state.get('fullscreen_monitor', 0)]
+                # Letterbox the frame to fit monitor, black bars
+                final_frame = letterbox_image(final_frame, (mon_h, mon_w), fill_color=(0, 0, 0))
 
-        # Display the frame - with error handling
-        try:
-            cv2.imshow(cv2_window_name, final_frame)
-        except cv2.error:
-            create_windowed_window()
-            cv2.imshow(cv2_window_name, final_frame)
+            # Display the frame - with error handling
+            try:
+                cv2.imshow(cv2_window_name, final_frame)
+            except cv2.error:
+                create_windowed_window()
+                cv2.imshow(cv2_window_name, final_frame)
 
-        # Handle key presses
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC key
-            break
-        elif key == ord('f'):  # F key to toggle fullscreen
-            current_state = load_state()
-            current_state['fullscreen'] = not current_state['fullscreen']
-            with open(STATE_FILE, 'w') as f:
-                json.dump(current_state, f)
+            # Handle key presses
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC key
+                break
+            elif key == ord('f'):  # F key to toggle fullscreen
+                current_state = load_state()
+                current_state['fullscreen'] = not current_state['fullscreen']
+                with open(STATE_FILE, 'w') as f:
+                    json.dump(current_state, f)
 
         prev_gray = gray.copy()
         frame_count += 1
 
     # Cleanup
-    cap.release()
+    if cap:
+        cap.release()
     cv2.destroyAllWindows()
 
 def run_main_video_loop():
