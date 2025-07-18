@@ -43,6 +43,7 @@ vj_state = {
     'overlay_video': "",
     'overlay_enabled': False,
     'silhouette_threshold': 50,
+    'flash_color_mode': 'white',  # Default flash color mode
 }
 
 # FPS tracking
@@ -234,6 +235,16 @@ def on_silhouette_threshold(sender, app_data):
     vj_state['silhouette_threshold'] = app_data
     save_state()
 
+def on_trigger_flash():
+    """Trigger flash effect in video window"""
+    vj_state['trigger_flash'] = True
+    save_state()
+
+def on_flash_color_mode(sender, app_data):
+    """Callback for flash color mode selection"""
+    vj_state['flash_color_mode'] = app_data.lower()
+    save_state()
+
 def on_video_source(sender, app_data):
     """Callback for switching between camera and video file as video source."""
     vj_state['video_source'] = app_data
@@ -371,6 +382,16 @@ with dpg.window(label="VJ Controls", width=450, height=1000, tag="control_window
     dpg.add_slider_int(label="Max Dark Spots", default_value=10, min_value=1, max_value=100, callback=on_max_dark)
     dpg.add_checkbox(label="Show Moving Spots", default_value=True, callback=on_show_moving)
     dpg.add_slider_int(label="Max Moving Spots", default_value=5, min_value=1, max_value=100, callback=on_max_moving)
+
+    dpg.add_separator()
+
+    # Flash Control
+    dpg.add_text("Flash Effect:", color=(255, 255, 100))
+    dpg.add_button(label="⚡ FLASH ⚡", callback=lambda: on_trigger_flash(), width=200, height=40)
+    dpg.add_combo(label="Flash Color", items=["White", "Black", "Red", "Color"], default_value="White", callback=on_flash_color_mode, tag="flash_color_combo")
+    dpg.add_text("Click to trigger flash effect", color=(150, 150, 150))
+    dpg.add_text("Also works with SPACE key in video window", color=(150, 150, 150))
+    dpg.add_text("'Color' mode cycles through rainbow colors", color=(150, 150, 150))
 
     dpg.add_separator()
 

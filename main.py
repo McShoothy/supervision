@@ -32,6 +32,13 @@ DARK_ACCENT = (80, 80, 255)
 # Track inverted boxes: list of dicts with keys: coords, until, typ
 inverted_boxes = []
 
+# Flash effect variables
+flash_active = False
+flash_frames_remaining = 0
+FLASH_DURATION = 2  # Number of frames to show flash effect
+flash_color_hue = 0  # For rotating color mode
+
+# --- Configuration class ---
 class DetectionConfig:
     def __init__(self):
         self.top_bright_spots = 10  # default to 10
@@ -44,6 +51,7 @@ class DetectionConfig:
 
 config = DetectionConfig()
 
+# --- Keybinds class ---
 class Keybinds:
     def __init__(self):
         self.quit = 27  # ESC
@@ -389,7 +397,7 @@ def init_camera():
 init_camera()
 
 def main_video_loop():
-    global prev_gray, frame_count, is_fullscreen, cap
+    global prev_gray, frame_count, is_fullscreen, cap, flash_active, flash_frames_remaining, flash_color_hue
 
     # Ensure camera is initialized
     if cap is None:
@@ -863,6 +871,73 @@ def main_video_loop():
                     json.dump(vj_state, f)
                 main_video_loop.last_fps_time = now_fps
                 main_video_loop.frame_counter = 0
+
+            # --- Letterbox for fullscreen: fill bars with black ---
+            if is_fullscreen:
+                # Get current monitor size
+                monitors = get_monitor_info()
+                mon_w, mon_h = 1920, 1080
+                if vj_state.get('fullscreen_monitor', 0) < len(monitors):
+                    _, _, mon_w, mon_h = monitors[vj_state.get('fullscreen_monitor', 0)]
+                # Letterbox the frame to fit monitor, black bars
+                final_frame = letterbox_image(final_frame, (mon_h, mon_w), fill_color=(0, 0, 0))
+
+            # Display the frame - with error handling
+            try:
+                cv2.imshow(cv2_window_name, final_frame)
+            except cv2.error:
+                create_windowed_window()
+                cv2.imshow(cv2_window_name, final_frame)
+
+            # Handle key presses
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC key
+                break
+            elif key == ord('f'):  # F key to toggle fullscreen
+                current_state = load_state()
+                current_state['fullscreen'] = not current_state['fullscreen']
+                with open(STATE_FILE, 'w') as f:
+                    json.dump(current_state, f)
+            elif key == ord(' '):  # Space key to trigger flash
+                flash_active = True
+                flash_frames_remaining = FLASH_DURATION
+
+            # Check for flash trigger from control window
+            if vj_state.get('trigger_flash', False):
+                flash_active = True
+                flash_frames_remaining = FLASH_DURATION
+                # Reset the trigger in state file
+                vj_state['trigger_flash'] = False
+                with open(STATE_FILE, 'w') as f:
+                    json.dump(vj_state, f)
+
+            # Apply flash effect if active
+            if flash_active and flash_frames_remaining > 0:
+                # Get flash color mode from state
+                flash_color_mode = vj_state.get('flash_color_mode', 'white')
+
+                # Create colored overlay based on selected mode
+                if flash_color_mode == 'white':
+                    flash_overlay = np.full_like(final_frame, 255, dtype=np.uint8)
+                elif flash_color_mode == 'black':
+                    flash_overlay = np.full_like(final_frame, 0, dtype=np.uint8)
+                elif flash_color_mode == 'red':
+                    flash_overlay = np.full_like(final_frame, [0, 0, 255], dtype=np.uint8)  # BGR format
+                elif flash_color_mode == 'color':
+                    # Rotating random color
+                    flash_color_hue = (flash_color_hue + 15) % 180  # Rotate hue
+                    color_bgr = hsv2bgr(flash_color_hue, 255, 255)
+                    flash_overlay = np.full_like(final_frame, color_bgr, dtype=np.uint8)
+                else:
+                    # Default to white if unknown mode
+                    flash_overlay = np.full_like(final_frame, 255, dtype=np.uint8)
+
+                # Apply flash with decreasing intensity over frames
+                flash_intensity = flash_frames_remaining / FLASH_DURATION
+                final_frame = cv2.addWeighted(final_frame, 1 - flash_intensity, flash_overlay, flash_intensity, 0)
+                flash_frames_remaining -= 1
+                if flash_frames_remaining <= 0:
+                    flash_active = False
 
             # --- Letterbox for fullscreen: fill bars with black ---
             if is_fullscreen:
