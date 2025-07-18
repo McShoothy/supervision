@@ -18,11 +18,9 @@ vj_state = {
     'fullscreen': False,
     'fullscreen_monitor': 0,
     'show_silhouettes': True,
-    'show_humans': True,
     'show_bright': True,
     'show_dark': True,
     'show_moving': True,
-    'show_faces': True,
     'max_bright': 20,
     'max_dark': 10,
     'max_moving': 5,
@@ -30,6 +28,7 @@ vj_state = {
     'camera_brightness': 50,
     'camera_contrast': 50,
     'camera_hue': 50,
+    'camera_index': 0,  # Default to camera 0
     'filter_cvr': False,
     'filter_static': False,
     'filter_grain': False,
@@ -91,10 +90,6 @@ def on_show_silhouettes(sender, app_data):
     vj_state['show_silhouettes'] = app_data
     save_state()
 
-def on_show_humans(sender, app_data):
-    vj_state['show_humans'] = app_data
-    save_state()
-
 def on_show_bright(sender, app_data):
     vj_state['show_bright'] = app_data
     save_state()
@@ -105,10 +100,6 @@ def on_show_dark(sender, app_data):
 
 def on_show_moving(sender, app_data):
     vj_state['show_moving'] = app_data
-    save_state()
-
-def on_show_faces(sender, app_data):
-    vj_state['show_faces'] = app_data
     save_state()
 
 def on_max_bright(sender, app_data):
@@ -253,6 +244,13 @@ def on_video_file(sender, app_data):
     vj_state['selected_video_file'] = app_data
     save_state()
 
+def on_camera_selection(sender, app_data):
+    """Callback for selecting which camera to use."""
+    # Extract camera index from the selected string (e.g., "Camera 0" -> 0)
+    camera_index = int(app_data.split()[-1])
+    vj_state['camera_index'] = camera_index
+    save_state()
+
 def get_video_duration(filepath):
     """Get video duration in seconds using OpenCV."""
     try:
@@ -367,14 +365,12 @@ with dpg.window(label="VJ Controls", width=450, height=1000, tag="control_window
     dpg.add_text("Individual Box Types:", color=(200, 200, 200))
     dpg.add_checkbox(label="Show Silhouettes", default_value=True, callback=on_show_silhouettes)
     dpg.add_slider_int(label="Silhouette Threshold", default_value=50, min_value=0, max_value=255, callback=on_silhouette_threshold, tag="silhouette_threshold_slider")
-    dpg.add_checkbox(label="Show Humans", default_value=False, callback=on_show_humans)
     dpg.add_checkbox(label="Show Bright Spots", default_value=True, callback=on_show_bright)
     dpg.add_slider_int(label="Max Bright Spots", default_value=10, min_value=1, max_value=100, callback=on_max_bright)
     dpg.add_checkbox(label="Show Dark Spots", default_value=True, callback=on_show_dark)
     dpg.add_slider_int(label="Max Dark Spots", default_value=10, min_value=1, max_value=100, callback=on_max_dark)
     dpg.add_checkbox(label="Show Moving Spots", default_value=True, callback=on_show_moving)
     dpg.add_slider_int(label="Max Moving Spots", default_value=5, min_value=1, max_value=100, callback=on_max_moving)
-    dpg.add_checkbox(label="Show Faces", default_value=False, callback=on_show_faces)
 
     dpg.add_separator()
 
@@ -404,12 +400,9 @@ with dpg.window(label="VJ Controls", width=450, height=1000, tag="control_window
     dpg.add_text("When enabled, overlays selected video on top of camera feed.", color=(150, 150, 150))
 
     dpg.add_separator()
-    dpg.add_text("Video Source:", color=(255, 150, 50))
-    dpg.add_radio_button(items=["Camera", "Video File"], default_value="Camera", callback=on_video_source, tag="video_source_radio")
-    dpg.add_combo(label="Select Video File", items=video_files, default_value=video_files[0], callback=on_video_file, tag="video_file_combo")
-    dpg.add_progress_bar(default_value=0.0, tag="video_progress_bar", overlay="", width=350)
-    dpg.add_text("0:00 / 0:00", tag="video_progress_text")
-    dpg.add_text("Switch between camera and video files in ./videos", color=(150, 150, 150))
+    dpg.add_text("Camera Selection:", color=(255, 150, 50))
+    dpg.add_combo(label="Select Camera", items=["Camera 0", "Camera 1", "Camera 2", "Camera 3"], default_value="Camera 0", callback=on_camera_selection, tag="camera_selection_combo")
+    dpg.add_text("Select which camera device to use for video input", color=(150, 150, 150))
 
 def update_counts():
     """Read detection counts from state file and update FPS"""

@@ -9,21 +9,12 @@ import multiprocessing
 # Control state file for communication between windows
 STATE_FILE = "/tmp/vj_state.json"
 
-# Initialize HOG person detector
-hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-# Load Haar cascade for face (head) detection
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 prev_gray = None
 
-human_names = ["Raver", "Dancer", "Mover", "Groover", "Soul"]
 hand_names = ["Gesture", "Wave", "Grip", "Touch", "Pulse"]
-head_names = ["Mind", "Thinker", "Brain", "Focus", "Dream"]
 bright_names = ["Flash", "Glow", "Spark", "Beam", "Blaze", "Pixel", "Node", "Point", "Dot", "Ray"]
 moving_names = ["Shift", "Drift", "Pulse", "Flow", "Surge"]
 
@@ -88,11 +79,9 @@ def load_state():
         'fullscreen': False,
         'fullscreen_monitor': 0,
         'show_silhouettes': True,
-        'show_humans': False,  # default off
         'show_bright': True,
         'show_dark': True,
         'show_moving': True,
-        'show_faces': False,   # default off
         'max_bright': 10,      # default to 10
         'max_dark': 10,
         'max_moving': 5,
@@ -333,11 +322,9 @@ def update_video_texture():
 
     # Individual box controls
     show_silhouettes = vj_state.get('show_silhouettes', True)
-    show_humans = vj_state.get('show_humans', False)
     show_bright = vj_state.get('show_bright', True)
     show_dark = vj_state.get('show_dark', True)
     show_moving = vj_state.get('show_moving', True)
-    show_faces = vj_state.get('show_faces', False)
     silhouette_threshold = vj_state.get('silhouette_threshold', 50)
 
     # Max box counts from state
@@ -373,6 +360,9 @@ def update_video_texture():
         detection_counts = {'humans': 0, 'bright': 0, 'dark': 0, 'move': 0, 'faces': 0}
 
         if show_boxes:
+            # Initialize bright_spot_centers to avoid reference errors
+            bright_spot_centers = []
+
             # Silhouette detection
             if show_silhouettes:
                 fg_mask = bg_subtractor.apply(proc_frame)
@@ -394,25 +384,25 @@ def update_video_texture():
                         x, y, w, h = cv2.boundingRect(contour)
                         cv2.putText(overlay_small, f"Silhouette: {label} [{obj_id}] {{{percent}%}}", (x, y-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
 
-            # Human detection (use grayscale for speed)
-            if show_humans:
-                humans, _ = hog.detectMultiScale(gray, winStride=(8,8), padding=(8,8), scale=1.05)
-                detection_counts['humans'] = len(humans)
-                for idx, (x, y, w, h) in enumerate(humans):
-                    cx, cy = x + w // 2, y + h // 2
-                    box_w, box_h = max(w // 2, 10), max(h // 2, 10)
-                    x1, y1 = cx - box_w // 2, cy - box_h // 2
-                    x2, y2 = cx + box_w // 2, cy + box_h // 2
-                    color = hsv2bgr((hue_shift + idx * 10 + 30) % 180)
-                    cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                    label = random.choice(human_names)
-                    percent = random.randint(0, 100)
-                    obj_id = random.randint(1000, 9999)
-                    text = f"Human: {label} [{obj_id}] {{{percent}%}}"
-                    cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.1, color, 0.5)
-                    box_centers.append(((cx, cy), (x1, y1, x2, y2), "human"))
-            else:
-                detection_counts['humans'] = 0
+                        # 1/20 chance to invert this silhouette area
+                        if random.randint(1, 20) == 1:
+                            # Scale coordinates to full resolution
+                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                            x_full = int(x * scale_x)
+                            y_full = int(y * scale_y)
+                            w_full = int(w * scale_x)
+                            h_full = int(h * scale_y)
+
+                            # Ensure coordinates are within frame bounds
+                            x_full = max(0, min(x_full, full_res_frame.shape[1] - w_full))
+                            y_full = max(0, min(y_full, full_res_frame.shape[0] - h_full))
+                            w_full = min(w_full, full_res_frame.shape[1] - x_full)
+                            h_full = min(h_full, full_res_frame.shape[0] - y_full)
+
+                            # Invert the region inside the silhouette bounding box
+                            if w_full > 0 and h_full > 0:
+                                frame_dark[y_full:y_full+h_full, x_full:x_full+w_full] = cv2.bitwise_not(frame_dark[y_full:y_full+h_full, x_full:x_full+w_full])
 
             # Bright spots (configurable amount)
             if show_bright:
@@ -444,6 +434,27 @@ def update_video_texture():
                     cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                     box_centers.append(((cx, cy), (x1, y1, x2, y2), 'bright'))
                     bright_spot_centers.append((cx, cy))
+
+                    # 1/20 chance to invert this box
+                    if random.randint(1, 20) == 1:
+                        # Scale coordinates to full resolution
+                        scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                        scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                        x1_full = int(x1 * scale_x)
+                        y1_full = int(y1 * scale_y)
+                        x2_full = int(x2 * scale_x)
+                        y2_full = int(y2 * scale_y)
+
+                        # Ensure coordinates are within frame bounds
+                        x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                        y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                        x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                        y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                        # Invert the region inside the box on the final frame
+                        if x2_full > x1_full and y2_full > y1_full:
+                            frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
             else:
                 detection_counts['bright'] = 0
 
@@ -475,6 +486,27 @@ def update_video_texture():
                     text = f"Dark: {label} [{obj_id}] {{{percent}%}}"
                     cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                     box_centers.append(((cx, cy), (x1, y1, x2, y2), 'dark'))
+
+                    # 1/20 chance to invert this box
+                    if random.randint(1, 20) == 1:
+                        # Scale coordinates to full resolution
+                        scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                        scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                        x1_full = int(x1 * scale_x)
+                        y1_full = int(y1 * scale_y)
+                        x2_full = int(x2 * scale_x)
+                        y2_full = int(y2 * scale_y)
+
+                        # Ensure coordinates are within frame bounds
+                        x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                        y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                        x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                        y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                        # Invert the region inside the box on the final frame
+                        if x2_full > x1_full and y2_full > y1_full:
+                            frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
             else:
                 detection_counts['dark'] = 0
 
@@ -499,40 +531,88 @@ def update_video_texture():
                         text = f"Move: {label} [{obj_id}] {{{percent}%}}"
                         cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                         box_centers.append(((cx, cy), (x1, y1, x2, y2), 'move'))
+
+                        # 1/20 chance to invert this box
+                        if random.randint(1, 20) == 1:
+                            # Scale coordinates to full resolution
+                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                            x1_full = int(x1 * scale_x)
+                            y1_full = int(y1 * scale_y)
+                            x2_full = int(x2 * scale_x)
+                            y2_full = int(y2 * scale_y)
+
+                            # Ensure coordinates are within frame bounds
+                            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                            # Invert the region inside the box on the final frame
+                            if x2_full > x1_full and y2_full > y1_full:
+                                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
             else:
                 detection_counts['move'] = 0
 
-            # Head detection (face) on smaller frame
-            if show_faces:
-                heads = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
-                detection_counts['faces'] = len(heads)
-                for idx, (x, y, w, h) in enumerate(heads):
-                    cx, cy = x + w // 2, y + h // 2
-                    box_w, box_h = max(w // 2, 10), max(h // 2, 10)
-                    x1, y1 = cx - box_w // 2, cy - box_h // 2
-                    x2, y2 = cx + box_w // 2, cy + box_h // 2
-                    color = hsv2bgr((hue_shift + idx * 10 + 150) % 180)
-                    cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                    label = random.choice(head_names)
-                    percent = random.randint(0, 100)
-                    obj_id = random.randint(1000, 9999)
-                    text = f"Head: {label} [{obj_id}] {{{percent}%}}"
-                    cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                    box_centers.append(((cx, cy), (x1, y1, x2, y2), 'head'))
-            else:
-                detection_counts['faces'] = 0
-
-            # Draw lines from each bright spot to at least 2 other boxes
+            # Draw lines from each bright spot to the 2 nearest boxes
             if len(box_centers) > 2 and 'bright_spot_centers' in locals():
                 for idx, b_c in enumerate(bright_spot_centers):
-                    other_indices = [i for i, (center, _, _) in enumerate(box_centers) if center != b_c]
-                    if len(other_indices) >= 2:
-                        chosen = random.sample(other_indices, min(2, len(other_indices)))
-                        for j, idx2 in enumerate(chosen):
-                            target_center = box_centers[idx2][0]
+                    # Calculate distances to all other boxes
+                    distances = []
+                    for i, (center, _, _) in enumerate(box_centers):
+                        if center != b_c:  # Don't include the bright spot itself
+                            dx = center[0] - b_c[0]
+                            dy = center[1] - b_c[1]
+                            distance = (dx * dx + dy * dy) ** 0.5  # Euclidean distance
+                            distances.append((distance, i, center))
+
+                    # Sort by distance and get the 2 nearest
+                    distances.sort(key=lambda x: x[0])
+                    nearest_boxes = distances[:min(2, len(distances))]
+
+                    # Draw lines to the 2 nearest boxes
+                    for distance, box_idx, target_center in nearest_boxes:
+                        color = (255, 255, 255)  # WHITE for lines
+                        # Draw as thin as possible (1px), anti-aliased line
+                        cv2.line(overlay_small, b_c, target_center, color, 1, lineType=cv2.LINE_AA)
+
+                    # 1/5 chance to draw a third line to a random box (not considering distance)
+                    if random.randint(1, 5) == 1 and len(distances) > 2:
+                        # Get boxes that weren't already connected (exclude the 2 nearest)
+                        used_indices = {box_idx for _, box_idx, _ in nearest_boxes}
+                        remaining_boxes = [item for item in distances if item[1] not in used_indices]
+
+                        if remaining_boxes:
+                            # Pick a random box from the remaining ones
+                            random_box = random.choice(remaining_boxes)
+                            _, _, random_target_center = random_box
                             color = (255, 255, 255)  # WHITE for lines
-                            # Draw as thin as possible (1px), anti-aliased line
-                            cv2.line(overlay_small, b_c, target_center, color, 0.1, lineType=cv2.LINE)
+                            cv2.line(overlay_small, b_c, random_target_center, color, 1, lineType=cv2.LINE_AA)
+
+        # Apply random box inversions (1/10 chance per box)
+        if box_centers and random.randint(1, 10) == 1:
+            # Select a random box to invert
+            selected_box = random.choice(box_centers)
+            _, (x1, y1, x2, y2), _ = selected_box
+
+            # Scale coordinates to full resolution
+            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+            x1_full = int(x1 * scale_x)
+            y1_full = int(y1 * scale_y)
+            x2_full = int(x2 * scale_x)
+            y2_full = int(y2 * scale_y)
+
+            # Ensure coordinates are within frame bounds
+            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+            # Invert the region inside the box on the final frame
+            if x2_full > x1_full and y2_full > y1_full:
+                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
 
         # Save detection counts for control window
         save_detection_counts(detection_counts)
@@ -788,11 +868,9 @@ def main_video_loop():
 
         # Individual box controls
         show_silhouettes = vj_state.get('show_silhouettes', True)
-        show_humans = vj_state.get('show_humans', False)
         show_bright = vj_state.get('show_bright', True)
         show_dark = vj_state.get('show_dark', True)
         show_moving = vj_state.get('show_moving', True)
-        show_faces = vj_state.get('show_faces', False)
         silhouette_threshold = vj_state.get('silhouette_threshold', 50)
 
         # Max box counts from state
@@ -828,6 +906,9 @@ def main_video_loop():
             detection_counts = {'humans': 0, 'bright': 0, 'dark': 0, 'move': 0, 'faces': 0}
 
             if show_boxes:
+                # Initialize bright_spot_centers to avoid reference errors
+                bright_spot_centers = []
+
                 # Silhouette detection
                 if show_silhouettes:
                     fg_mask = bg_subtractor.apply(proc_frame)
@@ -849,25 +930,25 @@ def main_video_loop():
                             x, y, w, h = cv2.boundingRect(contour)
                             cv2.putText(overlay_small, f"Silhouette: {label} [{obj_id}] {{{percent}%}}", (x, y-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
 
-                # Human detection (use grayscale for speed)
-                if show_humans:
-                    humans, _ = hog.detectMultiScale(gray, winStride=(8,8), padding=(8,8), scale=1.05)
-                    detection_counts['humans'] = len(humans)
-                    for idx, (x, y, w, h) in enumerate(humans):
-                        cx, cy = x + w // 2, y + h // 2
-                        box_w, box_h = max(w // 2, 10), max(h // 2, 10)
-                        x1, y1 = cx - box_w // 2, cy - box_h // 2
-                        x2, y2 = cx + box_w // 2, cy + box_h // 2
-                        color = hsv2bgr((hue_shift + idx * 10 + 30) % 180)
-                        cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                        label = random.choice(human_names)
-                        percent = random.randint(0, 100)
-                        obj_id = random.randint(1000, 9999)
-                        text = f"Human: {label} [{obj_id}] {{{percent}%}}"
-                        cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                        box_centers.append(((cx, cy), (x1, y1, x2, y2), "human"))
-                else:
-                    detection_counts['humans'] = 0
+                            # 1/20 chance to invert this silhouette area
+                            if random.randint(1, 20) == 1:
+                                # Scale coordinates to full resolution
+                                scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                                scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                                x_full = int(x * scale_x)
+                                y_full = int(y * scale_y)
+                                w_full = int(w * scale_x)
+                                h_full = int(h * scale_y)
+
+                                # Ensure coordinates are within frame bounds
+                                x_full = max(0, min(x_full, full_res_frame.shape[1] - w_full))
+                                y_full = max(0, min(y_full, full_res_frame.shape[0] - h_full))
+                                w_full = min(w_full, full_res_frame.shape[1] - x_full)
+                                h_full = min(h_full, full_res_frame.shape[0] - y_full)
+
+                                # Invert the region inside the silhouette bounding box
+                                if w_full > 0 and h_full > 0:
+                                    frame_dark[y_full:y_full+h_full, x_full:x_full+w_full] = cv2.bitwise_not(frame_dark[y_full:y_full+h_full, x_full:x_full+w_full])
 
                 # Bright spots (configurable amount)
                 if show_bright:
@@ -899,6 +980,27 @@ def main_video_loop():
                         cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                         box_centers.append(((cx, cy), (x1, y1, x2, y2), 'bright'))
                         bright_spot_centers.append((cx, cy))
+
+                        # 1/20 chance to invert this box
+                        if random.randint(1, 20) == 1:
+                            # Scale coordinates to full resolution
+                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                            x1_full = int(x1 * scale_x)
+                            y1_full = int(y1 * scale_y)
+                            x2_full = int(x2 * scale_x)
+                            y2_full = int(y2 * scale_y)
+
+                            # Ensure coordinates are within frame bounds
+                            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                            # Invert the region inside the box on the final frame
+                            if x2_full > x1_full and y2_full > y1_full:
+                                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
                 else:
                     detection_counts['bright'] = 0
 
@@ -930,6 +1032,27 @@ def main_video_loop():
                         text = f"Dark: {label} [{obj_id}] {{{percent}%}}"
                         cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                         box_centers.append(((cx, cy), (x1, y1, x2, y2), 'dark'))
+
+                        # 1/20 chance to invert this box
+                        if random.randint(1, 20) == 1:
+                            # Scale coordinates to full resolution
+                            scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                            scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                            x1_full = int(x1 * scale_x)
+                            y1_full = int(y1 * scale_y)
+                            x2_full = int(x2 * scale_x)
+                            y2_full = int(y2 * scale_y)
+
+                            # Ensure coordinates are within frame bounds
+                            x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                            y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                            x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                            y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                            # Invert the region inside the box on the final frame
+                            if x2_full > x1_full and y2_full > y1_full:
+                                frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
                 else:
                     detection_counts['dark'] = 0
 
@@ -954,40 +1077,64 @@ def main_video_loop():
                             text = f"Move: {label} [{obj_id}] {{{percent}%}}"
                             cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
                             box_centers.append(((cx, cy), (x1, y1, x2, y2), 'move'))
+
+                            # 1/20 chance to invert this box
+                            if random.randint(1, 20) == 1:
+                                # Scale coordinates to full resolution
+                                scale_x = full_res_frame.shape[1] / proc_frame.shape[1]
+                                scale_y = full_res_frame.shape[0] / proc_frame.shape[0]
+                                x1_full = int(x1 * scale_x)
+                                y1_full = int(y1 * scale_y)
+                                x2_full = int(x2 * scale_x)
+                                y2_full = int(y2 * scale_y)
+
+                                # Ensure coordinates are within frame bounds
+                                x1_full = max(0, min(x1_full, full_res_frame.shape[1] - 1))
+                                y1_full = max(0, min(y1_full, full_res_frame.shape[0] - 1))
+                                x2_full = max(0, min(x2_full, full_res_frame.shape[1] - 1))
+                                y2_full = max(0, min(y2_full, full_res_frame.shape[0] - 1))
+
+                                # Invert the region inside the box on the final frame
+                                if x2_full > x1_full and y2_full > y1_full:
+                                    frame_dark[y1_full:y2_full, x1_full:x2_full] = cv2.bitwise_not(frame_dark[y1_full:y2_full, x1_full:x2_full])
+
                 else:
                     detection_counts['move'] = 0
 
-                # Head detection (face) on smaller frame
-                if show_faces:
-                    heads = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
-                    detection_counts['faces'] = len(heads)
-                    for idx, (x, y, w, h) in enumerate(heads):
-                        cx, cy = x + w // 2, y + h // 2
-                        box_w, box_h = max(w // 2, 10), max(h // 2, 10)
-                        x1, y1 = cx - box_w // 2, cy - box_h // 2
-                        x2, y2 = cx + box_w // 2, cy + box_h // 2
-                        color = hsv2bgr((hue_shift + idx * 10 + 150) % 180)
-                        cv2.rectangle(overlay_small, (x1, y1), (x2, y2), color, 1)  # 1px thick
-                        label = random.choice(head_names)
-                        percent = random.randint(0, 100)
-                        obj_id = random.randint(1000, 9999)
-                        text = f"Head: {label} [{obj_id}] {{{percent}%}}"
-                        cv2.putText(overlay_small, text, (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.3, color, 1)
-                        box_centers.append(((cx, cy), (x1, y1, x2, y2), 'head'))
-                else:
-                    detection_counts['faces'] = 0
-
-                # Draw lines from each bright spot to at least 2 other boxes
+                # Draw lines from each bright spot to the 2 nearest boxes
                 if len(box_centers) > 2 and 'bright_spot_centers' in locals():
                     for idx, b_c in enumerate(bright_spot_centers):
-                        other_indices = [i for i, (center, _, _) in enumerate(box_centers) if center != b_c]
-                        if len(other_indices) >= 2:
-                            chosen = random.sample(other_indices, min(2, len(other_indices)))
-                            for j, idx2 in enumerate(chosen):
-                                target_center = box_centers[idx2][0]
+                        # Calculate distances to all other boxes
+                        distances = []
+                        for i, (center, _, _) in enumerate(box_centers):
+                            if center != b_c:  # Don't include the bright spot itself
+                                dx = center[0] - b_c[0]
+                                dy = center[1] - b_c[1]
+                                distance = (dx * dx + dy * dy) ** 0.5  # Euclidean distance
+                                distances.append((distance, i, center))
+
+                        # Sort by distance and get the 2 nearest
+                        distances.sort(key=lambda x: x[0])
+                        nearest_boxes = distances[:min(2, len(distances))]
+
+                        # Draw lines to the 2 nearest boxes
+                        for distance, box_idx, target_center in nearest_boxes:
+                            color = (255, 255, 255)  # WHITE for lines
+                            # Draw as thin as possible (1px), anti-aliased line
+                            cv2.line(overlay_small, b_c, target_center, color, 1, lineType=cv2.LINE_AA)
+
+                        # 1/5 chance to draw a third line to a random box (not considering distance)
+                        if random.randint(1, 5) == 1 and len(distances) > 2:
+                            # Get boxes that weren't already connected (exclude the 2 nearest)
+                            used_indices = {box_idx for _, box_idx, _ in nearest_boxes}
+                            remaining_boxes = [item for item in distances if item[1] not in used_indices]
+
+                            if remaining_boxes:
+                                # Pick a random box from the remaining ones
+                                random_box = random.choice(remaining_boxes)
+                                _, _, random_target_center = random_box
                                 color = (255, 255, 255)  # WHITE for lines
-                                # Draw as thin as possible (1px), anti-aliased line
-                                cv2.line(overlay_small, b_c, target_center, color, 1, lineType=cv2.LINE_AA)
+                                cv2.line(overlay_small, b_c, random_target_center, color, 1, lineType=cv2.LINE_AA)
 
             # Save detection counts for control window
             save_detection_counts(detection_counts)
